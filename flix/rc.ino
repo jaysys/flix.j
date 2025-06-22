@@ -3,10 +3,12 @@
 
 // Work with the RC receiver
 
-#include <SBUS.h>
+#include "sbus.h"
 #include "util.h"
 
-SBUS RC(Serial2); // NOTE: Use RC(Serial2, 16, 17) if you use the old UART2 pins
+// Using Serial2 for SBUS input
+// Parameters: Serial port, RX pin, TX pin, inverted signal (true for SBUS)
+bfs::SbusRx RC(&Serial2, 16, 17, true);
 
 // RC channels mapping:
 int rollChannel = 0;
@@ -22,13 +24,16 @@ float channelMax[16];
 
 void setupRC() {
 	print("Setup RC\n");
-	RC.begin();
+	RC.Begin();
 }
 
 bool readRC() {
-	if (RC.read()) {
-		SBUSData data = RC.data();
-		memcpy(channels, data.ch, sizeof(channels)); // copy channels data
+	if (RC.Read()) {
+		bfs::SbusData data = RC.data();
+		// Copy channels data (1-16)
+		for (int i = 0; i < 16; i++) {
+			channels[i] = data.ch[i];
+		}
 		normalizeRC();
 		controlsTime = t;
 		return true;

@@ -4,34 +4,143 @@
 // Work with the IMU sensor
 
 #include <SPI.h>
-#include <MPU9250.h>
+#include "MPU9250_WE.h"
 #include "lpf.h"
 #include "util.h"
 
-MPU9250 IMU(SPI);
+// For ESP32 watchdog timer
+#ifdef ESP32
+#include "esp_task_wdt.h"
+#endif
+
+#define CS_PIN 10
+#define IMU_RESET_PIN 9  // Connect this to the IMU's reset pin if available
+
+MPU9250_WE IMU = MPU9250_WE(&SPI, CS_PIN, true); // true for SPI mode
+
+void resetIMU() {
+    #ifdef IMU_RESET_PIN
+    pinMode(IMU_RESET_PIN, OUTPUT);
+    digitalWrite(IMU_RESET_PIN, LOW);
+    delay(10);
+    digitalWrite(IMU_RESET_PIN, HIGH);
+    delay(100);  // Give some time to reset
+    #endif
+}
+
+void disableWatchdog() {
+#ifdef ESP32
+    disableCore0WDT();
+    disableCore1WDT();
+    disableLoopWDT();
+#endif
+}
+
+void enableWatchdog() {
+#ifdef ESP32
+    enableLoopWDT();
+#endif
+}
 
 Vector accBias;
 Vector accScale(1, 1, 1);
 Vector gyroBias;
 
 void setupIMU() {
-	print("Setup IMU\n");
-	IMU.begin();
-	configureIMU();
+    print("Starting IMU initialization...\n");
+    disableWatchdog();  // Disable watchdog during initialization
+    
+    // Give some time for the SPI bus to stabilize
+    delay(100);
+    
+    // Reset IMU hardware
+    resetIMU();
+    
+    // Initialize the IMU with retry logic
+    bool initSuccess = false;
+    for (int i = 0; i < 3; i++) {  // Try up to 3 times
+        print("MPU9250 init attempt %d...", i + 1);
+        bool result = IMU.init();
+        print("%s\n", result ? "OK" : "FAILED");
+        
+        if (result) {
+            // Check WHO_AM_I register
+            byte whoAmI = IMU.whoAmI();
+            print("WHO_AM_I: 0x%02X\n", whoAmI);
+            
+            if (whoAmI == 0x71 || whoAmI == 0x73) {  // 0x71 or 0x73 are valid MPU9250/6500 IDs
+                initSuccess = true;
+                break;
+            } else {
+                print("Invalid WHO_AM_I value\n");
+            }
+        }
+        delay(100);
+    }
+    
+    if (!initSuccess) {
+        print("ERROR: MPU9250 init failed after multiple attempts\n");
+        enableWatchdog();
+        return;
+    }
+    print("MPU9250 initialized successfully\n");
+    
+    // Configure IMU settings
+    print("Configuring IMU...\n");
+    configureIMU();
+    
+    // Verify IMU is responding
+    if (IMU.whoAmI() != 0x71) {
+        print("ERROR: IMU not responding correctly\n");
+        enableWatchdog();
+        return;
+    }
+    
+    enableWatchdog();  // Re-enable watchdog after initialization
+    print("IMU setup complete\n");
 }
 
 void configureIMU() {
-	IMU.setAccelRange(IMU.ACCEL_RANGE_4G);
-	IMU.setGyroRange(IMU.GYRO_RANGE_2000DPS);
-	IMU.setDLPF(IMU.DLPF_MAX);
-	IMU.setRate(IMU.RATE_1KHZ_APPROX);
-	IMU.setupInterrupt();
+    // Basic configuration based on MPU9250_WE example
+    IMU.autoOffsets();
+    
+    // Set accelerometer range to ±4g
+    // Options: MPU9250_ACC_RANGE_2G, MPU9250_ACC_RANGE_4G, 
+    //          MPU9250_ACC_RANGE_8G, MPU9250_ACC_RANGE_16G
+    IMU.setAccRange(MPU9250_ACC_RANGE_4G);
+    
+    // Set gyroscope range to ±2000°/s
+    // Options: MPU9250_GYRO_RANGE_250, MPU9250_GYRO_RANGE_500,
+    //          MPU9250_GYRO_RANGE_1000, MPU9250_GYRO_RANGE_2000
+    IMU.setGyrRange(MPU9250_GYRO_RANGE_2000);
+    
+    // Enable digital low pass filter for gyroscope
+    IMU.enableGyrDLPF();
+    
+    // Set digital low pass filter to 5Hz
+    // Options: MPU9250_DLPF_0, MPU9250_DLPF_1, MPU9250_DLPF_2, 
+    //          MPU9250_DLPF_3, MPU9250_DLPF_4, MPU9250_DLPF_5, MPU9250_DLPF_6
+    IMU.setGyrDLPF(MPU9250_DLPF_5);
+    
+    // Set sample rate divider (0 = 1kHz, 1 = 500Hz, etc.)
+    IMU.setSampleRateDivider(0);
+    
+    // Initialize magnetometer if available
+    #ifdef MPU9250_WE_USE_MAG
+    IMU.initMagnetometer();
+    #endif
 }
 
 void readIMU() {
-	IMU.waitForData();
-	IMU.getGyro(gyro.x, gyro.y, gyro.z);
-	IMU.getAccel(acc.x, acc.y, acc.z);
+	xyzFloat accel = IMU.getGyrValues();
+	gyro.x = accel.x * DEG_TO_RAD;
+	gyro.y = accel.y * DEG_TO_RAD;
+	gyro.z = accel.z * DEG_TO_RAD;
+	
+	accel = IMU.getAccRawValues();
+	acc.x = accel.x * 9.80665; // convert g to m/s²
+	acc.y = accel.y * 9.80665;
+	acc.z = accel.z * 9.80665;
 	calibrateGyroOnce();
 	// apply scale and bias
 	acc = (acc - accBias) / accScale;
@@ -59,7 +168,7 @@ void calibrateGyroOnce() {
 
 void calibrateAccel() {
 	print("Calibrating accelerometer\n");
-	IMU.setAccelRange(IMU.ACCEL_RANGE_2G); // the most sensitive mode
+	IMU.setAccRange(MPU9250_ACC_RANGE_2G); // the most sensitive mode
 
 	print("1/6 Place level [8 sec]\n");
 	pause(8);
@@ -93,9 +202,12 @@ void calibrateAccelOnce() {
 	// Compute the average of the accelerometer readings
 	acc = Vector(0, 0, 0);
 	for (int i = 0; i < samples; i++) {
-		IMU.waitForData();
-		Vector sample;
-		IMU.getAccel(sample.x, sample.y, sample.z);
+		xyzFloat sample_acc = IMU.getAccRawValues();
+		Vector sample(
+			sample_acc.x * 9.80665,  // convert g to m/s²
+			sample_acc.y * 9.80665,
+			sample_acc.z * 9.80665
+		);
 		acc = acc + sample;
 	}
 	acc = acc / samples;
@@ -119,7 +231,8 @@ void printIMUCal() {
 }
 
 void printIMUInfo() {
-	IMU.status() ? print("status: ERROR %d\n", IMU.status()) : print("status: OK\n");
-	print("model: %s\n", IMU.getModel());
+	// Check if we can read data from the IMU
+	bool dataReady = IMU.readAndClearInterrupts() & 0x01;
+	print("status: %s\n", dataReady ? "READY" : "NOT READY");
 	print("who am I: 0x%02X\n", IMU.whoAmI());
 }

@@ -53,7 +53,13 @@ Vector ratesTarget;
 Vector torqueTarget;
 float thrustTarget;
 
-extern const int MOTOR_REAR_LEFT, MOTOR_REAR_RIGHT, MOTOR_FRONT_RIGHT, MOTOR_FRONT_LEFT;
+// Motor array indices in the Control namespace
+namespace Control {
+    const int MOTOR_REAR_LEFT = 0;
+    const int MOTOR_REAR_RIGHT = 1;
+    const int MOTOR_FRONT_RIGHT = 2;
+    const int MOTOR_FRONT_LEFT = 3;
+}
 extern int rollChannel, pitchChannel, throttleChannel, yawChannel, armedChannel, modeChannel;
 
 void control() {
